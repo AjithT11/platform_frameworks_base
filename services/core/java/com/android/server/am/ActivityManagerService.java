@@ -3579,6 +3579,7 @@ public class ActivityManagerService extends IActivityManager.Stub
                             false /* knownToBeDead */,
                             0 /* intentFlags */,
                            sNullHostingRecord /* hostingRecord */,
+                           0,
                            false /* allowWhileBooting */,
                            false /* isolated */,
                            true /* keepIfLarge */);

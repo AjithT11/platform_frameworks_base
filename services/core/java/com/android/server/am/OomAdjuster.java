@@ -1855,8 +1855,8 @@ public final class OomAdjuster {
                         break;
                 }
                 mProcessGroupHandler.sendMessage(mProcessGroupHandler.obtainMessage(
-                        0 /* unused */, app.pid, processGroup, app.processName, Integer.valueOf(app.info.uid)));
-                try {
+                        0 /* unused */, app.pid, processGroup, app.processName));
+                    try {
                     if (curSchedGroup == ProcessList.SCHED_GROUP_TOP_APP) {
                         // do nothing if we already switched to RT
                         if (oldSchedGroup != ProcessList.SCHED_GROUP_TOP_APP) {

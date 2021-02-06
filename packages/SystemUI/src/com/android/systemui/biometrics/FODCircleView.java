@@ -19,18 +19,26 @@ package com.android.systemui.biometrics;
 import android.app.admin.DevicePolicyManager;
 import android.content.Context;
 import android.content.res.Configuration;
+import android.content.ContentResolver;
 import android.content.res.Resources;
+import android.database.ContentObserver;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.drawable.AnimationDrawable;
 import android.graphics.PixelFormat;
 import android.graphics.Point;
+import android.graphics.PorterDuff;
+import android.hardware.biometrics.BiometricSourceType;
+import android.net.Uri;
 import android.os.Handler;
+import android.os.UserHandle;
 import android.os.Looper;
 import android.os.RemoteException;
 import android.provider.Settings;
 import android.view.Display;
 import android.view.Gravity;
+import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.View;
@@ -41,6 +49,7 @@ import com.android.internal.widget.LockPatternUtils;
 import com.android.keyguard.KeyguardSecurityModel.SecurityMode;
 import com.android.keyguard.KeyguardUpdateMonitor;
 import com.android.keyguard.KeyguardUpdateMonitorCallback;
+import com.android.settingslib.utils.ThreadUtils;
 import com.android.systemui.Dependency;
 import com.android.systemui.R;
 
@@ -71,6 +80,7 @@ public class FODCircleView extends ImageView {
     private boolean mIsBouncer;
     private boolean mIsDreaming;
     private boolean mIsCircleShowing;
+    private boolean mIsKeyguard;
 
     private Handler mHandler;
 
@@ -79,6 +89,9 @@ public class FODCircleView extends ImageView {
     private LockPatternUtils mLockPatternUtils;
 
     private Timer mBurnInProtectionTimer;
+
+    private FODAnimation mFODAnimation;
+    private boolean mIsRecognizingAnimEnabled;
 
     private IFingerprintInscreenCallback mFingerprintInscreenCallback =
             new IFingerprintInscreenCallback.Stub() {
@@ -111,8 +124,19 @@ public class FODCircleView extends ImageView {
         }
 
         @Override
+        public void onKeyguardVisibilityChanged(boolean showing) {
+            mIsKeyguard = showing;
+            updatePosition();
+            updateStyle();
+            if (mFODAnimation != null) {
+                mFODAnimation.setAnimationKeyguard(mIsKeyguard);
+            }
+        }
+
+        @Override
         public void onKeyguardBouncerChanged(boolean isBouncer) {
             mIsBouncer = isBouncer;
+            updateStyle();
             if (mUpdateMonitor.isFingerprintDetectionRunning()) {
                 if (isPinOrPattern(mUpdateMonitor.getCurrentUser()) || !isBouncer) {
                     show();
@@ -121,6 +145,9 @@ public class FODCircleView extends ImageView {
                 }
             } else {
                 hide();
+            }
+            if (mFODAnimation != null) {
+                mFODAnimation.setAnimationKeyguard(mIsBouncer);
             }
         }
 
@@ -136,6 +163,36 @@ public class FODCircleView extends ImageView {
             }
         }
     };
+
+    private class CustomSettingsObserver extends ContentObserver {
+        CustomSettingsObserver(Handler handler) {
+            super(handler);
+        }
+
+        void observe() {
+            ContentResolver resolver = mContext.getContentResolver();
+            resolver.registerContentObserver(Settings.System.getUriFor("fod_recognizing_animation_list"),
+                    false, this, UserHandle.USER_ALL);
+        }
+
+        void unobserve() {
+            mContext.getContentResolver().unregisterContentObserver(this);
+        }
+
+        @Override
+        public void onChange(boolean selfChange, Uri uri) {
+            update();
+            if (uri.equals(Settings.System.getUriFor("fod_recognizing_animation_list"))) {
+                updateStyle();
+            }
+        }
+
+        void update() {
+            updateStyle();
+        }
+    }
+
+    private CustomSettingsObserver mCustomSettingsObserver;
 
     public FODCircleView(Context context) {
         super(context);
@@ -172,6 +229,8 @@ public class FODCircleView extends ImageView {
 
         mHandler = new Handler(Looper.getMainLooper());
 
+        mCustomSettingsObserver = new CustomSettingsObserver(mHandler);
+
         mParams.height = mSize;
         mParams.width = mSize;
         mParams.format = PixelFormat.TRANSLUCENT;
@@ -202,6 +261,8 @@ public class FODCircleView extends ImageView {
 
         mWindowManager.addView(this, mParams);
 
+        mCustomSettingsObserver.observe();
+        mCustomSettingsObserver.update();
         updatePosition();
         hide();
 
@@ -209,6 +270,8 @@ public class FODCircleView extends ImageView {
 
         mUpdateMonitor = Dependency.get(KeyguardUpdateMonitor.class);
         mUpdateMonitor.registerCallback(mMonitorCallback);
+
+        mFODAnimation = new FODAnimation(context, mPositionX, mPositionY);
     }
 
     @Override
@@ -236,11 +299,13 @@ public class FODCircleView extends ImageView {
             return true;
         }
 
+        mHandler.post(() -> mFODAnimation.hideFODanimation());
         return false;
     }
 
     @Override
     public void onConfigurationChanged(Configuration newConfig) {
+        updateStyle();
         updatePosition();
     }
 
@@ -303,8 +368,10 @@ public class FODCircleView extends ImageView {
         setKeepScreenOn(true);
 
         setDim(true);
-        dispatchPress();
-
+        ThreadUtils.postOnBackgroundThread(() -> {
+            dispatchPress();
+        });
+        mHandler.post(() -> mFODAnimation.showFODanimation());	
         setImageDrawable(null);
         updatePosition();
         invalidate();
@@ -316,9 +383,12 @@ public class FODCircleView extends ImageView {
         setImageResource(R.drawable.fod_icon_default);
         invalidate();
 
-        dispatchRelease();
+	
+        ThreadUtils.postOnBackgroundThread(() -> {	
+            dispatchRelease();	
+        });	
         setDim(false);
-
+        mHandler.post(() -> mFODAnimation.hideFODanimation());	
         setKeepScreenOn(false);
     }
 
@@ -335,18 +405,33 @@ public class FODCircleView extends ImageView {
 
         updatePosition();
 
-        dispatchShow();
+        mCustomSettingsObserver.observe();	
+        mCustomSettingsObserver.update();	
+        ThreadUtils.postOnBackgroundThread(() -> {	
+            dispatchShow();	
+        });	
         setVisibility(View.VISIBLE);
     }
 
-    public void hide() {
-        setVisibility(View.GONE);
-        hideCircle();
-        dispatchHide();
+	public void hide() {	
+        setVisibility(View.GONE);	
+        mCustomSettingsObserver.unobserve();	
+        hideCircle();	
+        ThreadUtils.postOnBackgroundThread(() -> {	
+            dispatchHide();	
+        });	
     }
 
     private void updateAlpha() {
         setAlpha(mIsDreaming ? 0.5f : 1.0f);
+    }
+
+    private void updateStyle() {
+        mIsRecognizingAnimEnabled = Settings.System.getInt(mContext.getContentResolver(), "fod_recognizing_animation", 0) != 0;
+
+        if (mFODAnimation != null) {
+            mFODAnimation.update(mIsRecognizingAnimEnabled);
+        }
     }
 
     private void updatePosition() {
@@ -383,6 +468,7 @@ public class FODCircleView extends ImageView {
 
         if (mIsDreaming && !mIsCircleShowing) {
             mParams.y += mDreamingOffsetY;
+            mFODAnimation.updateParams(mParams.y);
         }
 
         mWindowManager.updateViewLayout(this, mParams);
